@@ -40,7 +40,8 @@ const TITLE_MAX = 60;
 const DESCRIPTION_MIN = 50;
 const DESCRIPTION_MAX = 160;
 
-/** The full list of scoring rules. Total weight = 100. */
+/** The full list of scoring rules. Weights are relative; the final score is
+ * normalized to a 0–100 percentage in `computeScore`. */
 const RULES: Rule[] = [
   {
     id: "title",
@@ -194,7 +195,11 @@ const RULES: Rule[] = [
     weight: 10,
     evaluate: ({ images }) => {
       if (images.totalImages === 0) {
-        return { earned: 10, passed: true, detail: "A página não possui imagens." };
+        return {
+          earned: 0,
+          passed: false,
+          detail: "Nenhuma imagem encontrada para avaliar o atributo alt.",
+        };
       }
       const ratio = images.imagesWithAlt / images.totalImages;
       const earned = Math.round(ratio * 10);

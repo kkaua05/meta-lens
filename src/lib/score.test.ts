@@ -148,9 +148,9 @@ describe("computeScore", () => {
         },
       }),
     );
-    // images-alt awards full points when there are no images.
-    expect(result.total).toBe(10);
-    expect(result.percentage).toBe(12);
+    // images-alt awards no points when there are no images to evaluate.
+    expect(result.total).toBe(0);
+    expect(result.percentage).toBe(0);
     expect(result.grade).toBe("Crítico");
   });
 
@@ -197,7 +197,7 @@ describe("computeScore", () => {
     expect(h1Item?.earned).toBe(5);
   });
 
-  it("awards full points for images when there are no images", () => {
+  it("awards no points for images when there are no images", () => {
     const result = computeScore(
       makeInput({
         images: {
@@ -211,8 +211,8 @@ describe("computeScore", () => {
       }),
     );
     const imagesItem = result.items.find((i) => i.id === "images-alt");
-    expect(imagesItem?.earned).toBe(10);
-    expect(imagesItem?.passed).toBe(true);
+    expect(imagesItem?.earned).toBe(0);
+    expect(imagesItem?.passed).toBe(false);
   });
 
   it("produces a score with exactly 10 items", () => {

@@ -189,11 +189,11 @@ export interface ScoreItem {
 
 /** The overall score result. */
 export interface ScoreResult {
-  /** Total score out of 100. */
+  /** Total points earned (sum of rule weights earned). */
   total: number;
-  /** Maximum possible score (always 100). */
+  /** Maximum possible points (sum of all rule weights). */
   max: number;
-  /** Percentage score (0-100). */
+  /** Percentage score (0-100), normalized from total/max. */
   percentage: number;
   /** A qualitative grade (e.g. "Ótimo", "Bom", "Regular", "Ruim"). */
   grade: string;
