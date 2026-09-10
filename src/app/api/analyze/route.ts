@@ -14,6 +14,43 @@ import type { SeoAnalysis, WebsiteAnalysis } from "@/types/analysis";
  * (never from the browser) with SSRF protection.
  */
 
+/** Maximum accepted JSON body size (bytes). */
+const MAX_BODY_BYTES = 16 * 1024; // 16 KB
+
+/**
+ * In-memory rate limiter (per serverless instance). Uses a sliding window:
+ * each client IP is allowed `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW_MS`.
+ *
+ * NOTE: This is best-effort for a single instance. For multi-instance
+ * deployments, use a shared store (e.g. Redis/Upstash).
+ */
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+const rateLimitHits = new Map<string, number[]>();
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const hits = (rateLimitHits.get(ip) ?? []).filter((t) => t > windowStart);
+  if (hits.length >= RATE_LIMIT_MAX) {
+    rateLimitHits.set(ip, hits);
+    return true;
+  }
+  hits.push(now);
+  rateLimitHits.set(ip, hits);
+  return false;
+}
+
+/** Extracts the client IP from common headers (best-effort). */
+function clientIp(request: Request): string {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
+
 /** Maps a FetchError code to an HTTP status code. */
 function statusForCode(code: string): number {
   switch (code) {
@@ -36,6 +73,26 @@ function statusForCode(code: string): number {
 }
 
 export async function POST(request: Request) {
+  // Rate limiting (best-effort, per instance).
+  if (isRateLimited(clientIp(request))) {
+    return NextResponse.json(
+      {
+        error: "RATE_LIMITED",
+        message: "Muitas requisições. Tente novamente em instantes.",
+      },
+      { status: 429 },
+    );
+  }
+
+  // Enforce a body size limit before parsing.
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+  if (contentLength > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { error: "PAYLOAD_TOO_LARGE", message: "O corpo da requisição é muito grande." },
+      { status: 413 },
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -151,5 +208,10 @@ export async function POST(request: Request) {
     score,
   };
 
-  return NextResponse.json(response);
+  return NextResponse.json(response, {
+    headers: {
+      // Analysis results are not user-specific; allow short-lived caching.
+      "Cache-Control": "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+    },
+  });
 }
