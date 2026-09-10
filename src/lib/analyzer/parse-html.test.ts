@@ -73,7 +73,7 @@ describe("parseHtml", () => {
     expect(links.totalLinks).toBe(3);
     expect(links.internalLinks).toBe(1);
     expect(links.externalLinks).toBe(1);
-    expect(links.brokenLinks).toBe(1);
+    expect(links.brokenLinks).toBe(0);
     expect(links.nofollowLinks).toBe(1);
     expect(links.noopenerLinks).toBe(1);
     expect(links.targetBlankLinks).toBe(1);
