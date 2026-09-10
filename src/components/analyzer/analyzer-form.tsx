@@ -3,22 +3,14 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
 import { SearchIcon, Loader2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { analyzeRequestSchema, type AnalyzeRequest } from "@/schemas/analyze";
 import type { WebsiteAnalysis } from "@/types/analysis";
 
-const formSchema = z.object({
-  url: z
-    .string()
-    .trim()
-    .min(1, "Informe uma URL para analisar.")
-    .max(2048, "A URL é muito longa."),
-});
-
-type FormValues = z.infer<typeof formSchema>;
+type FormValues = AnalyzeRequest;
 
 interface AnalyzerFormProps {
   onResult: (result: WebsiteAnalysis) => void;
@@ -38,7 +30,7 @@ export function AnalyzerForm({
     handleSubmit,
     formState: { errors },
   } = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
+    resolver: zodResolver(analyzeRequestSchema),
     defaultValues: { url: "" },
   });
 
