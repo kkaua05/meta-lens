@@ -37,10 +37,13 @@ const BLOCKED_HOSTNAMES = new Set([
  */
 function isPrivateIPv4(ip: string): boolean {
   const octets = ip.split(".").map(Number);
-  if (octets.length !== 4 || octets.some((o) => Number.isNaN(o))) {
+  if (
+    octets.length !== 4 ||
+    octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)
+  ) {
     return false;
   }
-  const [a, b] = octets;
+  const [a, b, c] = octets;
 
   // 0.0.0.0/8
   if (a === 0) return true;
@@ -54,18 +57,20 @@ function isPrivateIPv4(ip: string): boolean {
   if (a === 169 && b === 254) return true;
   // 172.16.0.0/12
   if (a === 172 && b >= 16 && b <= 31) return true;
-  // 192.0.0.0/24
-  if (a === 192 && b === 0) return true;
+  // 192.0.0.0/24 (IETF protocol assignments)
+  if (a === 192 && b === 0 && c === 0) return true;
   // 192.0.2.0/24 (TEST-NET-1)
-  if (a === 192 && b === 0) return true;
+  if (a === 192 && b === 0 && c === 2) return true;
+  // 192.88.99.0/24 (6to4 relay anycast)
+  if (a === 192 && b === 88 && c === 99) return true;
   // 192.168.0.0/16
   if (a === 192 && b === 168) return true;
   // 198.18.0.0/15 (benchmarking)
   if (a === 198 && (b === 18 || b === 19)) return true;
   // 198.51.100.0/24 (TEST-NET-2)
-  if (a === 198 && b === 51) return true;
+  if (a === 198 && b === 51 && c === 100) return true;
   // 203.0.113.0/24 (TEST-NET-3)
-  if (a === 203 && b === 0) return true;
+  if (a === 203 && b === 0 && c === 113) return true;
   // 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved)
   if (a >= 224) return true;
 

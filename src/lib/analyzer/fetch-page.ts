@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { Agent } from "undici";
 import { validateResolvedAddresses, validateUrlSecurity } from "@/lib/security/url";
 
 /**
@@ -76,9 +77,10 @@ const HTML_CONTENT_TYPES = new Set([
 
 /**
  * Resolves a hostname to its IP addresses and validates them for SSRF safety.
- * Throws a `FetchError` if resolution fails or any address is private.
+ * Returns the first validated public IP address, or throws a `FetchError` if
+ * resolution fails or any address is private.
  */
-async function resolveAndValidate(hostname: string): Promise<void> {
+async function resolveAndValidate(hostname: string): Promise<string> {
   let addresses: string[];
   try {
     addresses = await lookup(hostname, { all: true, verbatim: true }).then(
@@ -97,6 +99,24 @@ async function resolveAndValidate(hostname: string): Promise<void> {
       "O endereço informado não é permitido.",
     );
   }
+
+  return addresses[0];
+}
+
+/**
+ * Builds an undici `Agent` whose DNS lookup is pinned to a pre-validated IP
+ * address. This closes the DNS-rebinding TOCTOU window: the connection is
+ * established to the exact IP we validated, and the `Host` header (and TLS
+ * SNI) still carry the original hostname.
+ */
+function pinnedAgent(hostname: string, ip: string): Agent {
+  return new Agent({
+    connect: {
+      lookup: (_hostname, _options, callback) => {
+        callback(null, [{ address: ip, family: ip.includes(":") ? 6 : 4 }]);
+      },
+    },
+  });
 }
 
 /**
@@ -129,24 +149,30 @@ export async function fetchPage(
     const parsed = new URL(currentUrl);
     const hostname = parsed.hostname.toLowerCase();
 
-    // Resolve and validate DNS for the current host.
-    await resolveAndValidate(hostname);
+    // Resolve and validate DNS for the current host, then pin the connection
+    // to the validated IP to prevent DNS-rebinding (TOCTOU) attacks.
+    const validatedIp = await resolveAndValidate(hostname);
+    const dispatcher = pinnedAgent(hostname, validatedIp);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     let response: Response;
     try {
-      response = await fetch(currentUrl, {
+      // `dispatcher` is an undici extension not present in the global
+      // `RequestInit` type, so we widen the options object explicitly.
+      const requestInit: RequestInit & { dispatcher: Agent } = {
         method: "GET",
         redirect: "manual",
         signal: controller.signal,
+        dispatcher,
         headers: {
           "User-Agent": USER_AGENT,
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         },
-      });
+      };
+      response = await fetch(currentUrl, requestInit);
     } catch (err) {
       clearTimeout(timeout);
       if (err instanceof Error && err.name === "AbortError") {
