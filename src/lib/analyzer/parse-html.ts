@@ -18,14 +18,24 @@ import { parseMetadata, parseSocialMetadata } from "./metadata";
 
 /**
  * Extracts the text content of a meta tag by name or property.
+ *
+ * Matching is case-insensitive on the attribute value, since HTML meta
+ * names/properties are case-insensitive per the HTML spec.
  */
 export function getMetaContent(
   $: cheerio.CheerioAPI,
   key: string,
 ): string {
-  const byName = $(`meta[name="${key}"]`).attr("content");
+  const lowerKey = key.toLowerCase();
+  const byName = $("meta[name]")
+    .filter((_, el) => ($(el).attr("name") ?? "").toLowerCase() === lowerKey)
+    .first()
+    .attr("content");
   if (byName !== undefined) return byName;
-  const byProperty = $(`meta[property="${key}"]`).attr("content");
+  const byProperty = $("meta[property]")
+    .filter((_, el) => ($(el).attr("property") ?? "").toLowerCase() === lowerKey)
+    .first()
+    .attr("content");
   if (byProperty !== undefined) return byProperty;
   return "";
 }

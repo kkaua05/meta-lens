@@ -29,8 +29,8 @@ export function parseLinks(
     const a = $(el);
     const href = a.attr("href")?.trim() ?? "";
 
+    // Empty and fragment-only hrefs are placeholders, not broken links.
     if (href === "" || href === "#") {
-      brokenLinks += 1;
       return;
     }
 

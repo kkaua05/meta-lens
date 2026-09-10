@@ -23,9 +23,15 @@ export function parseMetadata(
   // Favicon detection: explicit <link rel="icon"> or default /favicon.ico.
   const faviconLink = $('link[rel~="icon"]').first().attr("href");
   const hasFavicon = faviconLink !== undefined;
-  const faviconUrl = faviconLink
-    ? new URL(faviconLink, finalUrl).toString()
-    : "";
+  let faviconUrl = "";
+  if (faviconLink) {
+    try {
+      faviconUrl = new URL(faviconLink, finalUrl).toString();
+    } catch {
+      // Malformed favicon URL — ignore rather than crash the analysis.
+      faviconUrl = "";
+    }
+  }
 
   return {
     title,
