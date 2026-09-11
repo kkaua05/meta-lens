@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
-import { Agent } from "undici";
+import http from "node:http";
+import https from "node:https";
 import { validateResolvedAddresses, validateUrlSecurity } from "@/lib/security/url";
 
 /**
@@ -104,18 +105,125 @@ async function resolveAndValidate(hostname: string): Promise<string> {
 }
 
 /**
- * Builds an undici `Agent` whose DNS lookup is pinned to a pre-validated IP
- * address. This closes the DNS-rebinding TOCTOU window: the connection is
- * established to the exact IP we validated, and the `Host` header (and TLS
- * SNI) still carry the original hostname.
+ * Builds a DNS `lookup` function pinned to a pre-validated IP address. This
+ * closes the DNS-rebinding TOCTOU window: the connection is established to the
+ * exact IP we validated, while the `Host` header (and TLS SNI via `servername`)
+ * still carry the original hostname.
+ *
+ * The callback must honour the standard Node `dns.lookup` contract: when
+ * `options.all` is true (used by `autoSelectFamily`), it receives an array of
+ * `{ address, family }`; otherwise it receives `(address, family)`.
  */
-function pinnedAgent(hostname: string, ip: string): Agent {
-  return new Agent({
-    connect: {
-      lookup: (_hostname, _options, callback) => {
-        callback(null, [{ address: ip, family: ip.includes(":") ? 6 : 4 }]);
+function pinnedLookup(ip: string) {
+  const family = ip.includes(":") ? 6 : 4;
+  return (
+    _hostname: string,
+    options: { all?: boolean },
+    callback: (
+      err: NodeJS.ErrnoException | null,
+      address: string | Array<{ address: string; family: number }>,
+      family?: number,
+    ) => void,
+  ): void => {
+    if (options?.all) {
+      callback(null, [{ address: ip, family }]);
+    } else {
+      callback(null, ip, family);
+    }
+  };
+}
+
+/**
+ * Performs a single HTTP(S) request using Node's native `http`/`https`
+ * modules, with DNS resolution pinned to a pre-validated IP address.
+ *
+ * We deliberately avoid the global `fetch` (and undici's `Agent` dispatcher)
+ * here: Node's global `fetch` uses its own bundled undici instance, which is
+ * incompatible with a separately-installed undici `Agent` and throws
+ * `invalid onRequestStart method`. Native `http(s).request` with the `lookup`
+ * option is the canonical, well-supported way to pin DNS for SSRF protection.
+ */
+function requestWithPinnedDns(
+  url: URL,
+  ip: string,
+  timeoutMs: number,
+  maxSizeBytes: number,
+): Promise<{
+  statusCode: number;
+  headers: http.IncomingHttpHeaders;
+  body: Buffer;
+}> {
+  return new Promise((resolve, reject) => {
+    const isHttps = url.protocol === "https:";
+    const transport = isHttps ? https : http;
+    const port = url.port ? Number(url.port) : isHttps ? 443 : 80;
+
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        headers: {
+          Host: url.host,
+          "User-Agent": USER_AGENT,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        },
+        // Pin DNS to the validated IP. `servername` keeps TLS SNI (and cert
+        // validation) bound to the original hostname.
+        lookup: pinnedLookup(ip),
+        servername: isHttps ? url.hostname : undefined,
       },
-    },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on("data", (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > maxSizeBytes) {
+            req.destroy(
+              new FetchError(
+                "CONTENT_TOO_LARGE",
+                "O conteúdo do site excede o limite de 2MB.",
+              ),
+            );
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          resolve({
+            statusCode: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+        res.on("error", reject);
+      },
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(
+        new FetchError("TIMEOUT", "A requisição excedeu o tempo limite."),
+      );
+    });
+
+    req.on("error", (err) => {
+      if (err instanceof FetchError) {
+        reject(err);
+      } else {
+        reject(
+          new FetchError(
+            "CONNECTION_ERROR",
+            "Não foi possível conectar ao site informado.",
+          ),
+        );
+      }
+    });
+
+    req.end();
   });
 }
 
@@ -152,48 +260,16 @@ export async function fetchPage(
     // Resolve and validate DNS for the current host, then pin the connection
     // to the validated IP to prevent DNS-rebinding (TOCTOU) attacks.
     const validatedIp = await resolveAndValidate(hostname);
-    const dispatcher = pinnedAgent(hostname, validatedIp);
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    let response: Response;
-    try {
-      // `dispatcher` is an undici extension not present in the global
-      // `RequestInit` type, so we widen the options object explicitly.
-      const requestInit: RequestInit & { dispatcher: Agent } = {
-        method: "GET",
-        redirect: "manual",
-        signal: controller.signal,
-        dispatcher,
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        },
-      };
-      response = await fetch(currentUrl, requestInit);
-    } catch (err) {
-      clearTimeout(timeout);
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new FetchError(
-          "TIMEOUT",
-          "A requisição excedeu o tempo limite.",
-        );
-      }
-      throw new FetchError(
-        "CONNECTION_ERROR",
-        "Não foi possível conectar ao site informado.",
-      );
-    }
+    const { statusCode, headers, body } = await requestWithPinnedDns(
+      parsed,
+      validatedIp,
+      timeoutMs,
+      maxSizeBytes,
+    );
 
     // Handle redirects.
-    if (
-      response.status >= 300 &&
-      response.status < 400 &&
-      response.headers.has("location")
-    ) {
-      clearTimeout(timeout);
+    if (statusCode >= 300 && statusCode < 400 && headers.location) {
       redirects += 1;
       if (redirects > maxRedirects) {
         throw new FetchError(
@@ -202,14 +278,9 @@ export async function fetchPage(
         );
       }
 
-      const location = response.headers.get("location");
-      if (!location) {
-        throw new FetchError(
-          "HTTP_ERROR",
-          "Redirecionamento sem destino.",
-          response.status,
-        );
-      }
+      const location = Array.isArray(headers.location)
+        ? headers.location[0]
+        : headers.location;
 
       // Resolve the redirect target against the current URL.
       const nextUrl = new URL(location, currentUrl).toString();
@@ -225,17 +296,18 @@ export async function fetchPage(
     }
 
     // Non-redirect response.
-    clearTimeout(timeout);
-
-    if (!response.ok) {
+    if (statusCode < 200 || statusCode >= 300) {
       throw new FetchError(
         "HTTP_ERROR",
-        `O site retornou o status HTTP ${response.status}.`,
-        response.status,
+        `O site retornou o status HTTP ${statusCode}.`,
+        statusCode,
       );
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
+    const rawContentType = headers["content-type"] ?? "";
+    const contentType = Array.isArray(rawContentType)
+      ? rawContentType[0]
+      : rawContentType;
     const baseType = contentType.split(";")[0].trim().toLowerCase();
 
     if (!HTML_CONTENT_TYPES.has(baseType)) {
@@ -245,48 +317,14 @@ export async function fetchPage(
       );
     }
 
-    // Read the body with a size limit.
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new FetchError(
-        "CONNECTION_ERROR",
-        "Não foi possível ler a resposta do site.",
-      );
-    }
-
-    const chunks: Uint8Array[] = [];
-    let totalBytes = 0;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        totalBytes += value.byteLength;
-        if (totalBytes > maxSizeBytes) {
-          reader.cancel();
-          throw new FetchError(
-            "CONTENT_TOO_LARGE",
-            "O conteúdo do site excede o limite de 2MB.",
-          );
-        }
-        chunks.push(value);
-      }
-    } catch (err) {
-      if (err instanceof FetchError) throw err;
-      throw new FetchError(
-        "CONNECTION_ERROR",
-        "Não foi possível ler a resposta do site.",
-      );
-    }
-
-    const html = Buffer.concat(chunks).toString("utf-8");
+    const html = body.toString("utf-8");
     const responseTimeMs = Date.now() - startedAt;
 
     return {
       finalUrl: currentUrl,
       html,
       contentType: baseType,
-      size: totalBytes,
+      size: body.length,
       responseTimeMs,
     };
   }
